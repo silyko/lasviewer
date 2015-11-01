@@ -17,15 +17,14 @@ Generalized - is not LAS specific.
 
 class VBOProvider(object):
 
-    def __init__(self, x, y, z, colors, center):
+    def __init__(self, x, y, z, colors):
         n = x.shape[0]
         i0 = 0
         vbsize = 2000000
         self.vbos = []
         while i0 < n:
             i1 = min(n, i0 + vbsize)
-            data = np.column_stack((x[i0:i1] - center[0], y[i0:i1] - center[1], z[
-                                   i0:i1] - center[2], colors[i0:i1])).astype(np.float32)
+            data = np.column_stack((x[i0:i1], y[i0:i1], z[i0:i1], colors[i0:i1])).astype(np.float32)
             vbo_ = vbo.VBO(data=data, usage=gl.GL_DYNAMIC_DRAW,
                            target=gl.GL_ARRAY_BUFFER)
             self.vbos.append((vbo_, i1 - i0))
@@ -52,7 +51,13 @@ class PointcloudViewerWidget(QGLWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.parent = parent
-        self.initial_z = 1500
+        self.initial_z = 1500.0
+        # The far and near z clipping planes -
+        # we should be able to change these at some point, e.g. for
+        # 'galaxies'
+        self.far_z = 3000.0
+        self.near_z = 0.01
+        # Initial locations and camera position
         self.location = np.array([0.0, 0.0, self.initial_z])
         self.focus = np.array([0.0, 0.0, 0.0])
         self.up = np.array([0.0, 1.0, 0.0])
@@ -60,17 +65,32 @@ class PointcloudViewerWidget(QGLWidget):
         self.dist = self.initial_z
         self.real_pos = self.location + self.center
         self.data_buffer = None
+        # Movement stuff..
         self.movement_granularity = 6.0
         self.look_granularity = 16.0
-        self.setMinimumSize(500, 500)
         self.old_mouse_x = 0
         self.old_mouse_y = 0
         self.mouse_speed = 0.4
         self.point_size = 1
+        # We will store x, y, z and colors here to increase speed, e.g.
+        # when changing colors. Comes at the cost of increasing memory
+        # consumption. So only store as float32 in viewer system.
         self.x = None
         self.y = None
         self.z = None
         self.colors = None
+        self.mask = None  # We can mask points ...
+        # Appearence
+        self.setMinimumSize(600, 600)
+
+    def set_mask(self, mask, refine=False):
+        if self.mask is None or not refine:
+            self.mask = mask
+        else:
+            self.mask &= mask
+
+    def clear_mask(self):
+        self.mask = None
 
     def increase_point_size(self):
         if self.point_size < 5:
@@ -87,27 +107,40 @@ class PointcloudViewerWidget(QGLWidget):
             self.setFocus()
 
     def set_points(self, x, y, z):
-        self.x = x
-        self.y = y
-        self.z = z
+        """
+        Input will (probably) be float64 arrays.
+        Subtract mean and store as float32.
+        """
+        # The center in real coordinates
         self.center[0] = x.mean()
         self.center[1] = y.mean()
         self.center[2] = z.mean()
-        xmin = x.min()
-        ymin = y.min()
-        r = max(self.center[0] - xmin, self.center[1] - ymin)
+        # store as float32
+        self.x = (x-self.center[0]).astype(np.float32)
+        self.y = (y-self.center[1]).astype(np.float32)
+        self.z = (z-self.center[2]).astype(np.float32)
+        # Check how much we need to move 'up'
+        r = max(self.x.max(), self.y.max())
         self.initial_z = r * 1.5
+        # The location in viewer coordinates
         self.location = np.array([0.0, 0.0, self.initial_z])
         self.movement_granularity = max(r / 500.0 * 6, 1)
+        # Position in real coordinates
         self.real_pos = self.location + self.center
 
     def set_colors(self, colors):
-        self.colors = colors
+        self.colors = colors.astype(np.float32)
 
     def update_view(self):
-
-        self.data_buffer = VBOProvider(self.x, self.y, self.z,
-                                       self.colors, self.center)
+        """
+        Regenerate VBOs. If self.mask is not None, perform a prefiltering.
+        Note, this may consume more memory.
+        """
+        x = self.x[self.mask] if self.mask is not None else self.x
+        y = self.y[self.mask] if self.mask is not None else self.y
+        z = self.z[self.mask] if self.mask is not None else self.z
+        colors = self.colors[self.mask] if self.mask is not None else self.colors
+        self.data_buffer = VBOProvider(x, y, z, colors)
         self.update()
         self.setFocus()
 
@@ -130,7 +163,7 @@ class PointcloudViewerWidget(QGLWidget):
         gl.glLoadIdentity()
         gl.glViewport(0, 0, w, h)
         gl.glLoadIdentity()
-        glu.gluPerspective(90, float(ratio), 0.001, 3000)
+        glu.gluPerspective(90, float(ratio), self.near_z, self.far_z)
         gl.glMatrixMode(gl.GL_MODELVIEW)
 
     def initializeGL(self):
@@ -244,7 +277,7 @@ class PointcloudViewerWidget(QGLWidget):
 
     def mouseDoubleClickEvent(self, event):
         if self.data_buffer is not None:
-            self.camera_move(20)
+            self.camera_move(self.movement_granularity)
             self.update()
 
     # for this to work - we seemingly need to give focus to this widget from
@@ -271,7 +304,7 @@ class PointcloudViewerWidget(QGLWidget):
 class ViewerContainer(QtGui.QWidget):
     """
     A handy container widget for the PointcloudViewerWidget.
-    Not LAS specific. 
+    Not LAS specific.
     We can increase point size, decrease point size and
     reset view
     """

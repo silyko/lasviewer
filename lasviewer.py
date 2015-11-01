@@ -7,6 +7,7 @@ import traceback
 import threading
 import sys
 import os
+import json
 import laspy.file as lasf
 import qt_glviewer
 
@@ -109,6 +110,8 @@ menu_model = (
     {"name": "&Display",
      "items": (("Increase point size", "increasePointSize"),
                ("Decrease point size", "decreasePointSize"),
+               ("Filtering", "setFilter"),
+               ("Clear mask", "clearMask"),
                ("Reset", "resetView"))}
 )
 
@@ -132,7 +135,7 @@ class LasViewer(QtGui.QMainWindow):
 
         self.dir = "/"
         self.logWindow = TextViewer(self)
-
+        self.filtering_expression = '{"x": [xmin,xmax], "y": [ymin,ymax],...}'
         # threading stuff
         self.background_task_signal = QtCore.SIGNAL("__my_backround_task")
         self.log_stdout_signal = QtCore.SIGNAL("__stdout_signal")
@@ -202,7 +205,31 @@ class LasViewer(QtGui.QMainWindow):
 
     def resetView(self):
         self.viewer.reset_all()
-
+    
+    def setFilter(self):
+        if self.lasf_object is not None:
+            expression, ok = QInputDialog.getText(self,
+                                    "Filtering",
+                                    "JSON expression:",
+                                    text=self.filtering_expression)
+            if ok:
+                self.filtering_expression = str(expression)
+                conditions = json.loads(self.filtering_expression)
+                M = np.ones((len(self.lasf_object),), dtype = np.bool)
+                for key in conditions:
+                    val_min, val_max = conditions[key]
+                    vals = getattr(self.lasf_object, key)
+                    M &= vals <= val_max
+                    M &= vals >= val_min
+                self.viewer.set_mask(M)
+                self.log("Updating view..")
+                self.viewer.update_view()
+    
+    def clearMask(self):
+        self.viewer.clear_mask()
+        self.log("Updating view..")
+        self.viewer.update_view()
+                
     # Other methods
     def onChangeColorMode(self):
         if self.lasf_object is not None:
